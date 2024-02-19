@@ -1526,7 +1526,7 @@ static ALCboolean mix_source_buffer_queue(ALCcontext *ctx, ALsource *src, Buffer
     Basically takes two vectors and gives you a vector that's perpendicular
     to both.
 */
-#if NEED_SCALAR_FALLBACK
+#if NEED_SCALAR_FALLBACK || 1
 static void xyzzy(ALfloat *v, const ALfloat *a, const ALfloat *b)
 {
     v[0] = (a[1] * b[2]) - (a[2] * b[1]);
@@ -1800,7 +1800,7 @@ static void calculate_channel_gains(const ALCcontext *ctx, const ALsource *src, 
        XYZZY!! https://en.wikipedia.org/wiki/Cross_product#Mnemonic
     */
 
-    #ifdef __SSE__ /* (the math is explained in the scalar version.) */
+    #ifdef __SSE__NOPE   /* (the math is explained in the scalar version.) */
     if (has_sse) {
         const __m128 at_sse = _mm_load_ps(at);
         const __m128 U_sse = normalize_sse(xyzzy_sse(at_sse, _mm_load_ps(up)));
@@ -1821,7 +1821,7 @@ static void calculate_channel_gains(const ALCcontext *ctx, const ALsource *src, 
     } else
     #endif
 
-    #ifdef __ARM_NEON__  /* (the math is explained in the scalar version.) */
+    #ifdef __ARM_NEON__NOPE  /* (the math is explained in the scalar version.) */
     if (has_neon) {
         const float32x4_t at_neon = vld1q_f32(at);
         const float32x4_t U_neon = normalize_neon(xyzzy_neon(at_neon, vld1q_f32(up)));
@@ -1843,45 +1843,39 @@ static void calculate_channel_gains(const ALCcontext *ctx, const ALsource *src, 
     #endif
 
     {
-    #if NEED_SCALAR_FALLBACK
+    #if NEED_SCALAR_FALLBACK || 1
+        ALfloat relPos[3];
         ALfloat U[3];
         ALfloat V[3];
         ALfloat N[3];
         ALfloat rotated[3];
-        ALfloat mags;
 
-        xyzzy(U, at, up);
-        normalize(U);
-        xyzzy(V, at, U);
-        SDL_memcpy(N, at, sizeof (N));
-        normalize(N);
+        memcpy(relPos, src->position, sizeof(relPos));
+        relPos[0] -= ctx->listener.position[0];
+        relPos[0] -= ctx->listener.position[1];
+        relPos[0] -= ctx->listener.position[2];
 
-        /* we don't need the bottom row of the gluLookAt matrix, since we don't
-           translate. (Matrix * Vector) is just filling in each element of the
-           output vector with the dot product of a row of the matrix and the
-           vector. I made some of these negative to make it work for my purposes,
-           but that's not what GLU does here.
+        SDL_memcpy(V, relPos, sizeof(V));
 
-           (This says gluLookAt is left-handed, so maybe that's part of it?)
-            https://stackoverflow.com/questions/25933581/how-u-v-n-camera-coordinate-system-explained-with-opengl
-         */
-        rotated[0] = dotproduct(position, U);
-        rotated[1] = -dotproduct(position, V);
-        rotated[2] = -dotproduct(position, N);
+        // Remove upwards component so it lies completely within the horizontal plane.
+        ALfloat a = dotproduct(V, up);
+        V[0] -= a * up[0];
+        V[1] -= a * up[1];
+        V[2] -= a * up[2];
 
-        /* At this point, we have rotated vector and we can calculate the angle
-           from 0 (directly in front of where the listener is facing) to 180
-           degrees (directly behind) ... */
+        // Calculate angle
+        ALfloat mags = magnitude(at) * magnitude(V);
+        ALfloat cosAngle = (mags == 0.0f) ? 0.0f : (dotproduct(at, V) / mags);
+        cosAngle = fmaxf(fminf(cosAngle, 1.0f), -1.0f);
+        radians = SDL_acosf(cosAngle);
 
-        mags = magnitude(at) * magnitude(rotated);
-        radians = (mags == 0.0f) ? 0.0f : SDL_acosf(dotproduct(at, rotated) / mags);
-        /* and we already have what we need to decide if those degrees are on the
-           listener's left or right...
-           https://gamedev.stackexchange.com/questions/43897/determining-if-something-is-on-the-right-or-left-side-of-an-object
-           ...we already did this dot product: it's in rotated[0]. */
+        // Get "right" vector
+        ALfloat R[3];
+        xyzzy(R, at, up);
 
-        /* make it negative to the left, positive to the right. */
-        if (rotated[0] < 0.0f) {
+        // If it's facing right, then it's positive, if it's facing left, then it's negative.
+        if (dotproduct(R,V) < 0.0f)
+        {
             radians = -radians;
         }
     #endif
